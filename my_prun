@@ -1,0 +1,50 @@
+#!/bin/bash
+
+#Usage: ./my_prun [CMD]
+
+[ $# -ne 1 ] && { echo "Usage: $0 [cmd]"; exit 1; }
+
+# Set some variables
+CMD=$1
+PWD=$(pwd)
+
+# Parse $SLURM_NODELIST into an iterable list of node names
+NODES=`echo $SLURM_NODELIST | tr -d c | tr -d [ | tr -d ] | perl -pe 's/(\d+)-(\d+)/join(",",$1..$2)/eg' | awk 'BEGIN { RS=","} { print "c"$1 }'`
+
+# Get available port number for port 0 with python
+PORT_0=`python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'`
+
+ROOT_HOST=$(hostname)
+
+# For each item in the nodefile, connect via ssh and run the cmd.
+# The -n parameter is important or ssh will consume the rest 
+# of the loop list in stdin.
+# Increment rank passed to the code for each node
+
+rank=0
+rank_port=-1
+ranks_per_node=$(expr $SLURM_NTASKS / $SLURM_NNODES)
+for curNode in $NODES; do
+    for (( i=0; i<$ranks_per_node; i++ )); do
+		# Get available port for each rank
+		if [ $rank -eq 0 ]; then
+			rank_port=$PORT_0
+		else
+			rank_port=`python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'`
+		fi
+		# Send information to tasks
+		ssh -n $curNode "export MYMPI_ROOT_HOST=$ROOT_HOST;export MYMPI_ROOT_PORT=$PORT_0;export MYMPI_PORT=$rank_port;export MYMPI_NODELIST=$SLURM_NODELIST;export MYMPI_NODENAME=$curNode;export MYMPI_RANK=$rank;export MYMPI_NTASKS=$SLURM_NTASKS;export MYMPI_NNODES=$SLURM_NNODES;cd $PWD;$CMD" & pid[$rank]=$!
+	
+	# rank incrementation
+	(( rank++ ))
+    done
+done
+
+#wait for each ssh / corresponding CMD to finish executing before exiting
+rank=0
+for curNode in $NODES; do
+    for (( i=0; i<$ranks_per_node; i++ )); do
+	wait ${pid[$rank]}
+	(( rank++ ))
+    done
+done
